@@ -1,85 +1,159 @@
 # SecPay — real-time wages on Base
 
-SecPay is a non-custodial payroll demo for the East African wage-access problem: workers can withdraw the portion of their salary they have already earned instead of waiting for the next 30-day pay date. An employer funds one ERC-20 payroll pool; each worker’s earned amount is calculated lazily when it is viewed or withdrawn. No per-second transactions are made.
+SecPay is a non-custodial wage-streaming dApp for workers who need access to earnings before a monthly payday. An employer funds a 30-day ERC-20 payroll pool; employees accrue a visible balance every second and can withdraw only what they have earned, directly to their wallet.
 
-> Status: the full source, tests, deployment scripts, and frontend are included. This workspace did not contain Foundry, an RPC endpoint, or a funded Base Sepolia deployer at build time, so the addresses below intentionally remain pending rather than claiming a deployment that did not occur.
+The prototype focuses on the East African wage-access problem: instant liquidity for earned wages, without asking an employer to make a transfer every second or giving a third party custody of payroll funds.
 
-## Architecture
+## Live Base Sepolia contracts
+
+| Contract | Address | Explorer |
+|---|---|---|
+| MockUSDC (mUSDC) | `0x42cb796103e7D67f0d585978d48749855a83f13e` | [BaseScan](https://sepolia.basescan.org/address/0x42cb796103e7D67f0d585978d48749855a83f13e) |
+| SecPayPool | `0xaE3b32c10947ED6c2d12bAA2b247A24E67984088` | [BaseScan](https://sepolia.basescan.org/address/0xaE3b32c10947ED6c2d12bAA2b247A24E67984088) |
+
+> These are testnet contracts. mUSDC has no value. Never put a private key, seed phrase, or production funds in this repository.
+
+## How it works
 
 ```mermaid
 flowchart LR
   E[Employer wallet] -->|approve + deposit mUSDC| P[SecPayPool]
-  E -->|add employee / start period| P
-  P -->|stores rate * 1e18 and timestamps| A[Lazy accrual]
-  A -->|on demand| B[accruedBalance]
-  W[Employee wallet] -->|withdraw| P
+  E -->|add employees + start period| P
+  P -->|stores rate and timestamps| L[Lazy accrual]
+  L -->|view or withdraw| A[Accrued balance]
+  W[Employee wallet] -->|withdraw earned mUSDC| P
   P -->|SafeERC20 transfer| W
-  F[Frontend] -->|one chain read then 60fps local animation| B
+  F[Next.js frontend] -->|one chain read + local animation| A
 ```
 
-`SecPayPool` accepts an ERC-20 address at deployment, so replacing mUSDC with Base USDC is a deployment configuration change. A 30-day period is 2,592,000 seconds. Rates are stored at 1e18 precision and any normal period-end division remainder is paid to the employee. The contract maintains a reservation ledger so an employer may only reclaim true surplus, never funds reserved for workers.
+No on-chain transfer happens every second. The contract records each employee's scaled rate and calculates the amount owed only when it is read or withdrawn. The UI animates that already-verifiable rate locally, then re-syncs on transactions and when the browser regains focus.
 
-## Project layout
+## Key design decisions
+
+- **Lazy accrual:** avoids impractical per-second transactions while retaining per-second earning semantics.
+- **30-day fixed period:** a pay period is 2,592,000 seconds. This makes monthly obligations predictable for the employer.
+- **Precision and dust:** rates are stored at 1e18 precision; the employee receives any rounding remainder at period end.
+- **Reserved payroll funds:** surplus withdrawal is limited to funds not reserved for employees, so an employer cannot reclaim earned or promised payroll.
+- **Stops, edits, and pauses:** removing a worker freezes their already-earned balance; salary changes settle the old rate first; pausing excludes paused time from accrual.
+- **ERC-20 abstraction:** SecPayPool accepts its payment token in the constructor. MockUSDC is used on Base Sepolia; production USDC is a deployment/configuration change, not a contract rewrite.
+
+## Project structure
 
 ```
-contracts/    Foundry source, tests, scripts
-frontend/     Next.js 14 App Router app
-.env.example  required contract and frontend configuration
+contracts/                  Foundry contracts, tests, deployment and sync scripts
+  src/SecPayPool.sol         Payroll pool contract
+  src/MockUSDC.sol           Six-decimal test token with an hourly faucet
+  test/SecPayPool.t.sol      Lifecycle, access control, precision and fuzz tests
+  deployments/               Recorded Base Sepolia addresses
+frontend/                   Next.js 14 App Router client
+  src/app/                   Landing, role selection and dashboards
+  src/contracts/             Frontend ABI and deployment address helpers
+.env.example                Root environment-variable template
 ```
 
-## Setup
+## Prerequisites
 
-1. Copy `.env.example` to `.env` and set `BASE_SEPOLIA_RPC_URL`, `PRIVATE_KEY`, and `NEXT_PUBLIC_WALLETCONNECT_PROJECT_ID`. Never commit this file.
-2. Install Foundry (Windows users can use the official Foundry installer) and dependencies:
+- Node.js 20 or newer
+- npm
+- Foundry (`forge`, `cast`)
+- A browser wallet (MetaMask, Coinbase Wallet, or WalletConnect-compatible wallet)
+- A Base Sepolia RPC URL and a wallet with small amount of Base Sepolia ETH only when deploying contracts
 
-   ```powershell
-   cd contracts
-   forge install foundry-rs/forge-std OpenZeppelin/openzeppelin-contracts --no-commit
-   forge test -vvv
-   ```
+## Local setup
 
-3. Deploy mUSDC and SecPayPool, then sync the addresses into the frontend:
+### 1. Clone and configure secrets
 
-   ```powershell
-   cd contracts
-   .\script\deploy-and-sync.ps1
-   ```
+```bash
+git clone https://github.com/kida256-glitch/secpay.git
+cd secpay
+Copy-Item .env.example .env
+notepad .env
+```
 
-   The script records addresses at `contracts/deployments/base-sepolia.json`. To re-sync an existing deployment, set `SECPAY_POOL_ADDRESS` and `MOCK_USDC_ADDRESS` from that file and run:
+Set these root `.env` values only if you intend to deploy contracts:
 
-   ```powershell
-   forge script script/SyncFrontend.s.sol:SyncFrontend
-   ```
+```
+BASE_SEPOLIA_RPC_URL=https://your-base-sepolia-rpc-url
+PRIVATE_KEY=0xyour_deployer_private_key
+ETHERSCAN_API_KEY=optional
+```
 
-4. Add the same two values as `NEXT_PUBLIC_SECPAY_POOL_ADDRESS` and `NEXT_PUBLIC_MOCK_USDC_ADDRESS` in `frontend/.env.local`, then run the web app:
+`PRIVATE_KEY` must begin with `0x`. Keep `.env` private; it is ignored by Git.
 
-   ```powershell
-   cd frontend
-   npm install
-   npm run dev
-   ```
+### 2. Install contract dependencies and test
 
-Set `NEXT_PUBLIC_BASE_MAINNET=true` and use the mainnet SecPay deployment plus the canonical Base USDC address when promoting to Base mainnet. Vercel only needs the `NEXT_PUBLIC_*` variables above.
+```bash
+cd contracts
+forge install foundry-rs/forge-std OpenZeppelin/openzeppelin-contracts --no-commit
+forge test -vvv
+```
 
-## Three-minute demo
+The Foundry suite covers pool creation, exact accrual, sequential withdrawals, full-month dust handling, employee removal, salary changes, pause/resume, privilege boundaries, reentrancy protection, and fuzzed time/salary inputs.
 
-1. Connect an employer wallet on Base Sepolia and click **Get test mUSDC**.
-2. Create a pool, add an employee wallet, enter a monthly mUSDC salary, approve/deposit the required amount, and start the period.
-3. Switch to the employee wallet. Its earned amount starts ticking in the dashboard; click **Withdraw** to send the accrued mUSDC immediately to that wallet.
+### 3. Run the frontend
 
-## Base Sepolia deployment
+Create `frontend/.env.local`:
 
-| Contract | Address | Explorer |
-|---|---|---|
-| MockUSDC | `0x42cb796103e7D67f0d585978d48749855a83f13e` | [BaseScan](https://sepolia.basescan.org/address/0x42cb796103e7D67f0d585978d48749855a83f13e) |
-| SecPayPool | `0xaE3b32c10947ED6c2d12bAA2b247A24E67984088` | [BaseScan](https://sepolia.basescan.org/address/0xaE3b32c10947ED6c2d12bAA2b247A24E67984088) |
+```
+NEXT_PUBLIC_SECPAY_POOL_ADDRESS=0xaE3b32c10947ED6c2d12bAA2b247A24E67984088
+NEXT_PUBLIC_MOCK_USDC_ADDRESS=0x42cb796103e7D67f0d585978d48749855a83f13e
+NEXT_PUBLIC_WALLETCONNECT_PROJECT_ID=your_walletconnect_project_id
+NEXT_PUBLIC_BASE_MAINNET=false
+```
 
-After `deploy-and-sync.ps1` completes, replace this table with the exact `https://sepolia.basescan.org/address/<address>` links produced by the deployment. This keeps the README honest and makes the deployment record reviewable.
+Then start the app:
 
-## Contract behavior and safety
+```bash
+cd frontend
+npm.cmd install
+npm.cmd run dev
+```
 
-- `withdraw` and `withdrawSurplus` are `nonReentrant`; all ERC-20 actions use `SafeERC20`.
-- A paused pool excludes the pause from virtual accrual time; no worker earns during the pause.
-- Removing a worker settles and freezes their already earned balance, which remains withdrawable.
-- Salary changes settle earnings at the old rate before applying the new rate. Raising a salary requires enough additional pool balance to cover the revised liability.
-- The test suite covers lifecycle, exact-period/dust behavior, withdrawal, pause/removal/update cases, privilege boundaries, surplus protection, and fuzzed accrual bounds.
+Open http://localhost:3000. `npm.cmd` avoids Windows PowerShell execution-policy blocks that can affect `npm.ps1`.
+
+## Deploy contracts to Base Sepolia
+
+Fund the deployer wallet with Base Sepolia ETH, set the root `.env` values above, then run:
+
+```bash
+cd contracts
+powershell.exe -ExecutionPolicy Bypass -File .\script\deploy-and-sync.ps1
+```
+
+The script deploys MockUSDC and SecPayPool, writes `contracts/deployments/base-sepolia.json`, and syncs frontend deployment helpers. Copy the resulting addresses into `frontend/.env.local` before running the app.
+
+## Sample demo data — under three minutes
+
+Use two Base Sepolia wallets: one Employer and one Employee. The employee address is the sample data; no database is required.
+
+1. Connect the employer wallet and switch to Base Sepolia.
+2. Click **Get test mUSDC**. The faucet mints 10,000 mUSDC once per hour per wallet.
+3. Choose **I'm an Employer** → **Create payroll pool**.
+4. Add the employee wallet address with a sample salary of 3,000 mUSDC/month.
+5. Deposit 3,000 mUSDC. Approve first when prompted, then deposit.
+6. Click **Start pay period**.
+7. Switch the wallet connection to the employee address, choose **I'm an Employee**, and open the employee dashboard.
+8. Watch the available balance increase. Wait a few seconds, then click **Withdraw** to transfer earned mUSDC to the employee wallet.
+
+For a second demo, use the employer dashboard's **Stop stream** button. The employee's balance should stop increasing until the employer resumes the stream.
+
+## Security and limitations
+
+- `withdraw` and `withdrawSurplus` use `nonReentrant`; token interactions use OpenZeppelin `SafeERC20`.
+- Admin operations are restricted to each pool's employer; employee withdrawal sends funds only to `msg.sender`.
+- MockUSDC is a public test token. It is not production USDC and is not a price-stable asset.
+- This is a prototype, not an audited payroll product. Obtain an independent smart-contract audit, legal review, monitoring, incident response plan, and production token integration before handling real wages.
+
+## How GPT-5.6 and Codex accelerated this project
+
+GPT-5.6 in Codex was used as an implementation partner throughout the prototype workflow. It accelerated the work by:
+
+- scaffolding the Foundry and Next.js project structure from a single product brief;
+- translating the wage-streaming requirements into a lazy-accrual, reserved-funds contract design;
+- producing Foundry test coverage for the hard cases: timestamp warps, pause accounting, rate changes, rounding remainder, permissions, and reentrancy;
+- generating the ABI/deployment synchronization path that keeps the frontend aligned with deployed contracts;
+- implementing the responsive employer and employee flows, including the locally animated accrued-balance display;
+- diagnosing Windows setup issues, Foundry deployment requirements, and GitHub publishing; and
+- drafting and maintaining this README, deployment runbook, and sample demo path.
+
+Codex accelerated implementation and iteration, while the project owner made the product choices: targeting wage access, using Base, prioritizing employer-funded pools, using a testnet faucet for demonstrations, and keeping withdrawals self-custodial. Human review remains essential for financial, legal, security, and production-release decisions.
